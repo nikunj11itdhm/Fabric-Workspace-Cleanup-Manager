@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf }}">
+  <meta name="session-context" content="{{ session_context }}">
+  <title>Fabric Workspace Manager</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+</head>
+<body>
+  <header>
+    <div class="brand"><span class="logo">F</span><div><strong>Fabric Workspace Manager</strong><small>LOCAL ADMIN CONSOLE</small></div></div>
+    <div class="identity">
+      <span class="local-badge">Localhost only</span>
+      {% if user %}
+      <span>{{ user }}</span>
+      <form method="post" action="/auth/logout" id="logout-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf }}">
+        <button class="secondary" type="submit">Sign out</button>
+      </form>
+      {% endif %}
+    </div>
+  </header>
+  <main>
+    <div class="page-title"><div><p class="eyebrow">MICROSOFT FABRIC</p><h1>Your workspaces. One control panel.</h1><p>Inspect artifacts, manage trial assignments, and clean up workspace items.</p></div></div>
+    <div id="notice" role="status" aria-live="polite" hidden></div>
+    <button id="reload-session" class="secondary" type="button" hidden>Reload current session</button>
+    {% if not user %}
+    <section class="card login-card">
+      <div><p class="step">01 / CONNECT</p><h2>Sign in with Microsoft Entra ID</h2><p>Use interactive Microsoft sign-in with your Fabric administrator account. No app registration, client ID, or client secret is needed from you.</p>
+        <form method="post" action="/auth/login" id="login-form" data-pending="{{ 'true' if login_pending else 'false' }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf }}">
+          <label for="tenant-id">Tenant ID</label>
+          <input id="tenant-id" name="tenant_id" placeholder="Directory (tenant) ID" required autocomplete="off">
+          <button type="submit">Sign in with Microsoft in browser</button>
+        </form>
+      </div>
+      <aside class="setup">
+        <h3>How browser sign-in works</h3>
+        <p>Enter your tenant ID and click the sign-in button. Microsoft Entra sign-in opens directly in your default browser. There is no CLI or terminal step.</p>
+        <p>Complete sign-in and MFA, then return to this page. It detects completion automatically and keeps the same web session signed in. Repeated clicks do not start another sign-in.</p>
+        <p>Workspace and artifact requests reuse one in-memory credential and refresh tokens silently. If Microsoft requires interaction again, you will see an error rather than repeated login windows.</p>
+        <p>This localhost app uses the Azure Identity SDK's Microsoft development application. Your organization must allow it and consent to Fabric access; an administrator may require a tenant-owned app instead. No tenant policy is bypassed.</p>
+        <p>Fabric administrator access enables inventory. Assignment additionally needs workspace Admin and capacity Contributor/Admin access. Item deletion needs item write access.</p>
+      </aside>
+    </section>
+    {% else %}
+    <div class="configuration">
+      <section class="card">
+        <p class="step">01 / IMPORT</p><h2>Workspace CSV</h2>
+        <p>Upload UTF-8 CSV with a <code>workspace_id</code> column. Duplicates are removed. Maximum 500 workspaces.</p>
+        <form id="import-form">
+          <label for="csv-file">CSV file</label>
+          <input id="csv-file" name="file" type="file" accept=".csv,text/csv" required>
+          <button type="submit">Import and inspect</button>
+        </form>
+        <p id="import-count" class="muted">No workspaces imported this session.</p>
+      </section>
+      <section class="card">
+        <p class="step">02 / ASSIGN</p><h2>Your trial-capacity IDs</h2>
+        <p>Provide existing trial capacities. Primary is attempted first; secondary is used after a confirmed failure.</p>
+        <label for="primary">Primary capacity ID</label>
+        <input id="primary" placeholder="Trial capacity UUID" autocomplete="off">
+        <label for="secondary">Secondary capacity ID <span class="muted">(optional)</span></label>
+        <input id="secondary" placeholder="Fallback trial capacity UUID" autocomplete="off">
+        <p class="muted">Already on any trial? Left unchanged. Unknown source SKU? Blocked rather than guessed. No capacities are created.</p>
+      </section>
+    </div>
+    <section class="card">
+      <div class="section-header"><div><p class="step">03 / MANAGE</p><h2>Imported workspaces <span id="workspace-count" class="count">0</span></h2></div><div class="actions"><button id="refresh" class="secondary" type="button">Refresh inventory</button><button id="assign" type="button">Assign selected to trial</button></div></div>
+      <p class="warning">Assignment moves selected non-trial workspaces, including workspaces currently on paid capacity. Existing trial workspaces are skipped. Assignment is verified before reporting success.</p>
+      <div class="table-wrap"><table><thead><tr><th><input id="select-all" type="checkbox" aria-label="Select all eligible workspaces"></th><th>Workspace</th><th>Capacity</th><th>Trial status</th><th>Actions</th></tr></thead><tbody id="workspaces"><tr><td colspan="5" class="empty">Import a CSV to inspect your workspaces.</td></tr></tbody></table></div>
+    </section>
+    <section class="card" id="artifacts-panel">
+      <div class="section-header"><div><p class="step">04 / EXPLORE</p><h2 id="artifact-title">Workspace artifacts</h2></div><span class="count" id="item-count">0</span></div>
+      <p class="muted">Select Artifacts on a workspace to fetch every page of its admin item inventory, including names and types.</p>
+      <div class="table-wrap"><table><thead><tr><th>Artifact name</th><th>Type</th><th>Item ID</th></tr></thead><tbody id="items"><tr><td colspan="3" class="empty">No workspace selected.</td></tr></tbody></table></div>
+    </section>
+    <section class="card" id="results-panel" hidden><h2>Operation results</h2><p id="result-summary"></p><div class="table-wrap"><table><thead><tr><th>Workspace / item</th><th>Status</th><th>Details</th></tr></thead><tbody id="results"></tbody></table></div></section>
+    <details class="card"><summary>Accessible capacities and API limitations</summary><div id="capacity-list"><p>Refresh inventory to load capacity details.</p></div><p class="muted">Only capacities where you have Contributor/Admin access are returned. The admin item inventory API is preview and rate-limited. Cleanup uses the Fabric item API: unsupported, dependent, or permission-blocked items are reported individually, never silently skipped. Folders and the workspace itself are retained. The API may soft-delete supported items; this app does not force permanent deletion.</p></details>
+    <dialog id="delete-dialog">
+      <div class="dialog-body"><p class="step danger-text">DANGER ZONE</p><h2>Delete workspace items</h2><p id="delete-workspace"></p>
+      <p class="warning">This deletes the listed items, not the workspace. Back up your data first. Recovery depends on the item type and tenant settings. Items created after the preview will not be deleted.</p>
+      <div class="table-wrap preview-table"><table><thead><tr><th>Item name</th><th>Type</th></tr></thead><tbody id="delete-items"></tbody></table></div>
+      <label for="delete-confirmation">Type this exact phrase:</label><code id="delete-phrase"></code>
+      <input id="delete-confirmation" autocomplete="off" spellcheck="false">
+      <div class="actions dialog-actions"><button id="cancel-delete" class="secondary" type="button">Cancel</button><button id="confirm-delete" class="danger" type="button" disabled>Delete listed items</button></div>
+      </div>
+    </dialog>
+    {% endif %}
+    <footer>Localhost only. Authentication stays in server memory for this web session. No tokens are stored on disk or sent to this page. Sign out when finished.</footer>
+  </main>
+</body>
+</html>
