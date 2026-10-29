@@ -15,6 +15,17 @@ resources. Back up your data and review the selected workspace before confirming
 
 ![Fabric Workspace Cleanup Manager browser sign-in](demo/browser-login.png)
 
+**Workspace import and trial-capacity assignment**
+
+![Workspace import and capacity configuration](demo/Home1.png)
+
+**Artifact inventory and cleanup results**
+
+![Workspace artifacts and completed item cleanup](demo/Home2.png)
+
+Account information, resource identifiers, and resource names in these two
+screenshots have been redacted or replaced with demo labels.
+
 ## Table of contents
 
 - [Overview](#overview)
@@ -406,7 +417,9 @@ Fabric-Workspace-Cleanup-Manager/
 |-- requirements-dev.txt      # Runtime + pytest and Ruff
 |-- sample-workspaces.csv     # Placeholder workspace IDs only
 |-- demo/
-|   `-- browser-login.png     # Login screenshot without tenant data
+|   |-- browser-login.png     # Login screenshot without tenant data
+|   |-- Home1.png             # Redacted workspace management screenshot
+|   `-- Home2.png             # Redacted artifact cleanup screenshot
 |-- templates/
 |   `-- index.html            # Login and management screens
 |-- static/
