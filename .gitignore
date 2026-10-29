@@ -8,6 +8,7 @@ __pycache__/
 *.csv
 !sample-workspaces.csv
 *.png
+!demo/browser-login.png
 *.jpg
 *.jpeg
 *.webp

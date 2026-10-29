@@ -11,6 +11,10 @@ explicitly confirmed item cleanup without deleting the workspace.
 assignment can move workspaces off paid capacities. Cleanup changes real Fabric
 resources. Back up your data and review the selected workspace before confirming.
 
+**Microsoft Entra browser sign-in**
+
+![Fabric Workspace Cleanup Manager browser sign-in](demo/browser-login.png)
+
 ## Table of contents
 
 - [Overview](#overview)
@@ -401,6 +405,8 @@ Fabric-Workspace-Cleanup-Manager/
 |-- requirements.txt          # Runtime Python libraries
 |-- requirements-dev.txt      # Runtime + pytest and Ruff
 |-- sample-workspaces.csv     # Placeholder workspace IDs only
+|-- demo/
+|   `-- browser-login.png     # Login screenshot without tenant data
 |-- templates/
 |   `-- index.html            # Login and management screens
 |-- static/
