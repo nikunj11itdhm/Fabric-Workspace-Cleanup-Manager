@@ -1,6 +1,8 @@
 import io
+import json
 import time
 from unittest.mock import Mock
+from zipfile import ZipFile
 
 import pytest
 
@@ -29,6 +31,63 @@ def context():
 
 def headers(state):
     return {"X-CSRF-Token": state["csrf"]}
+
+
+def test_backup_download_contains_inventory_and_definitions(context):
+    _, client, state, api = context
+    api.workspace.return_value = {"id": WORKSPACE}
+    api.pages.side_effect = [[], [{"id": ITEM, "type": "Notebook"}]]
+    api.item_definition.return_value = {"definition": {"parts": []}}
+    result = client.post(
+        "/api/backup",
+        json={"workspaceIds": [WORKSPACE, WORKSPACE]},
+        headers=headers(state),
+    )
+    assert result.status_code == 200
+    assert result.mimetype == "application/zip"
+    assert "attachment" in result.headers["Content-Disposition"]
+    assert result.headers["X-Backup-Status"] == "complete"
+    assert "no-store" in result.headers["Cache-Control"]
+    with ZipFile(io.BytesIO(result.data)) as archive:
+        manifest = json.loads(archive.read("manifest.json"))
+        assert len(manifest["workspaces"]) == 1
+        assert manifest["workspaces"][0]["items"][0]["definitionStatus"] == "exported"
+
+
+def test_backup_requires_login_csrf_and_imported_ids(context):
+    _, client, state, api = context
+    assert (
+        client.post("/api/backup", json={"workspaceIds": [WORKSPACE]}).status_code
+        == 403
+    )
+    for ids in [[], [OTHER], [None], [WORKSPACE] * 501]:
+        assert (
+            client.post(
+                "/api/backup", json={"workspaceIds": ids}, headers=headers(state)
+            ).status_code
+            == 400
+        )
+    state.pop("account")
+    assert (
+        client.post(
+            "/api/backup", json={"workspaceIds": [WORKSPACE]}, headers=headers(state)
+        ).status_code
+        == 401
+    )
+    api.workspace.assert_not_called()
+
+
+def test_backup_partial_archive_has_explicit_status(context):
+    _, client, state, api = context
+    api.workspace.side_effect = FabricError("Denied", 403)
+    api.pages.side_effect = [FabricError("Denied", 403), []]
+    result = client.post(
+        "/api/backup", json={"workspaceIds": [WORKSPACE]}, headers=headers(state)
+    )
+    assert result.status_code == 200
+    assert result.headers["X-Backup-Status"] == "partial"
+    with ZipFile(io.BytesIO(result.data)) as archive:
+        assert json.loads(archive.read("manifest.json"))["status"] == "partial"
 
 
 def test_unauthenticated_api_is_blocked(context):

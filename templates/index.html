@@ -24,7 +24,7 @@
     </div>
   </header>
   <main>
-    <div class="page-title"><div><p class="eyebrow">MICROSOFT FABRIC</p><h1>Your workspaces. One control panel.</h1><p>Inspect artifacts, manage trial assignments, and clean up workspace items.</p></div></div>
+    <div class="page-title"><div><p class="eyebrow product-label"><img class="product-logo" src="{{ url_for('static', filename='microsoft-fabric.svg') }}" width="48" height="48" alt="">MICROSOFT FABRIC</p><h1>Your workspaces. One control panel.</h1><p>Inspect artifacts, back up metadata, manage trial assignments, and clean up workspace items.</p></div></div>
     <div id="notice" role="status" aria-live="polite" hidden></div>
     <button id="reload-session" class="secondary" type="button" hidden>Reload current session</button>
     {% if not user %}
@@ -69,13 +69,19 @@
       </section>
     </div>
     <section class="card">
-      <div class="section-header"><div><p class="step">03 / MANAGE</p><h2>Imported workspaces <span id="workspace-count" class="count">0</span></h2></div><div class="actions"><button id="refresh" class="secondary" type="button">Refresh inventory</button><button id="assign" type="button">Assign selected to trial</button></div></div>
+      <div class="section-header"><div><p class="step">03 / MANAGE</p><h2>Imported workspaces <span id="workspace-count" class="count">0</span></h2></div><div class="actions"><button id="refresh" class="secondary" type="button">Refresh inventory</button><button id="backup" class="secondary" type="button">Back up selected metadata</button><button id="assign" type="button">Assign selected to trial</button></div></div>
+      <p class="muted">Metadata backup downloads a ZIP with workspace/item inventory and supported artifact definitions. Failed or unsupported exports are listed in manifest.json. It excludes actual data and does not guarantee restoration. Definition export requires item read/write permissions. Protect downloaded definitions as sensitive content.</p>
       <p class="warning">Assignment moves selected non-trial workspaces, including workspaces currently on paid capacity. Existing trial workspaces are skipped. Assignment is verified before reporting success.</p>
       <div class="table-wrap"><table><thead><tr><th><input id="select-all" type="checkbox" aria-label="Select all eligible workspaces"></th><th>Workspace</th><th>Capacity</th><th>Trial status</th><th>Actions</th></tr></thead><tbody id="workspaces"><tr><td colspan="5" class="empty">Import a CSV to inspect your workspaces.</td></tr></tbody></table></div>
     </section>
     <section class="card" id="artifacts-panel">
       <div class="section-header"><div><p class="step">04 / EXPLORE</p><h2 id="artifact-title">Workspace artifacts</h2></div><span class="count" id="item-count">0</span></div>
-      <p class="muted">Select Artifacts on a workspace to fetch every page of its admin item inventory, including names and types.</p>
+      <label for="explore-search">Filter workspaces by name or ID</label>
+      <input id="explore-search" type="search" placeholder="Search imported workspaces..." autocomplete="off">
+      <label for="explore-workspace">Workspace</label>
+      <select id="explore-workspace" aria-describedby="explore-workspace-count" disabled><option value="">Import a CSV to list workspaces.</option></select>
+      <p id="explore-workspace-count" class="muted" role="status">No workspace inventory loaded.</p>
+      <p class="muted">Choose a workspace here or use its Artifacts button above to load every page of its admin item inventory. Unavailable or inactive workspaces are listed but cannot be selected. Filtering here does not change selections for assignment or backup.</p>
       <div class="table-wrap"><table><thead><tr><th>Artifact name</th><th>Type</th><th>Item ID</th></tr></thead><tbody id="items"><tr><td colspan="3" class="empty">No workspace selected.</td></tr></tbody></table></div>
     </section>
     <section class="card" id="results-panel" hidden><h2>Operation results</h2><p id="result-summary"></p><div class="table-wrap"><table><thead><tr><th>Workspace / item</th><th>Status</th><th>Details</th></tr></thead><tbody id="results"></tbody></table></div></section>
@@ -90,7 +96,7 @@
       </div>
     </dialog>
     {% endif %}
-    <footer>Localhost only. Authentication stays in server memory for this web session. No tokens are stored on disk or sent to this page. Sign out when finished.</footer>
+    <footer>Localhost only. Authentication stays in server memory for this web session. No tokens are stored on disk or sent to this page. Sign out when finished. Independent administration utility; not an official Microsoft product. Microsoft Fabric icon identifies the connected platform.</footer>
   </main>
 </body>
 </html>

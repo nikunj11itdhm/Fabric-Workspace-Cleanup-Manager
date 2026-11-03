@@ -6,9 +6,20 @@ import time
 from datetime import timedelta
 from functools import wraps
 
-from flask import Flask, abort, g, jsonify, redirect, render_template, request, session
+from flask import (
+    Flask,
+    abort,
+    g,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    send_file,
+    session,
+)
 from werkzeug.exceptions import HTTPException
 
+from backup import metadata_backup
 from browser_auth import BrowserSession
 from fabric import FabricClient, FabricError, guid, parse_workspace_csv
 
@@ -284,6 +295,26 @@ def create_app(test_config=None):
                 result = {"status": "failed", "message": str(exc)}
             results.append({"workspaceId": workspace_id, **result})
         return jsonify(results=results)
+
+    @app.post("/api/backup")
+    @signed_in
+    @exclusive
+    def backup():
+        ids = body().get("workspaceIds")
+        if not isinstance(ids, list) or not ids or len(ids) > 500:
+            abort(400, "Select between 1 and 500 imported workspaces.")
+        if any(not isinstance(value, str) for value in ids):
+            abort(400, "Workspace IDs must be strings.")
+        workspace_ids = list(dict.fromkeys(imported(value) for value in ids))
+        archive, manifest = metadata_backup(client(), workspace_ids)
+        response = send_file(
+            archive,
+            mimetype="application/zip",
+            as_attachment=True,
+            download_name="fabric-metadata-backup.zip",
+        )
+        response.headers["X-Backup-Status"] = manifest["status"]
+        return response
 
     @app.post("/api/workspaces/<workspace_id>/delete-preview")
     @signed_in

@@ -15,5 +15,6 @@ __pycache__/
 *.jpeg
 *.webp
 local-data/
+*.zip
 .coverage
 htmlcov/

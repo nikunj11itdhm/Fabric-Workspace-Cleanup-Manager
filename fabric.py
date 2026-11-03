@@ -1,5 +1,6 @@
 import csv
 import io
+import socket
 import time
 from uuid import UUID
 
@@ -9,10 +10,67 @@ API_ROOT = "https://api.fabric.microsoft.com/v1/"
 
 
 class FabricError(Exception):
-    def __init__(self, message, status=502, uncertain=False):
+    def __init__(self, message, status=502, uncertain=False, error_code=None):
         super().__init__(message)
         self.status = status
         self.uncertain = uncertain
+        self.error_code = error_code
+
+
+def connection_error(exc, method):
+    if isinstance(exc, requests.exceptions.ProxyError):
+        reason = "The configured proxy could not connect to api.fabric.microsoft.com."
+        action = "Check your organization's HTTPS_PROXY configuration and proxy access."
+    elif isinstance(exc, requests.exceptions.SSLError):
+        reason = "TLS connection or certificate verification failed for api.fabric.microsoft.com."
+        action = (
+            "Ask your network administrator for the approved CA bundle and configure "
+            "REQUESTS_CA_BUNDLE. Do not disable certificate verification."
+        )
+    elif isinstance(exc, requests.exceptions.Timeout):
+        reason = "The connection to api.fabric.microsoft.com timed out."
+        action = (
+            "Check network, firewall, VPN, and proxy access to Fabric HTTPS port 443."
+        )
+    else:
+        pending = [exc]
+        seen = set()
+        dns_error = False
+        while pending:
+            current = pending.pop()
+            if id(current) in seen:
+                continue
+            seen.add(id(current))
+            if (
+                isinstance(current, socket.gaierror)
+                or type(current).__name__ == "NameResolutionError"
+            ):
+                dns_error = True
+            for nested in (
+                current.__cause__,
+                current.__context__,
+                getattr(current, "reason", None),
+                *current.args,
+            ):
+                if isinstance(nested, BaseException):
+                    pending.append(nested)
+        reason = (
+            "DNS could not resolve api.fabric.microsoft.com."
+            if dns_error
+            else "Could not connect to api.fabric.microsoft.com."
+        )
+        action = "Check DNS, firewall, VPN, and proxy access from the server computer."
+    outcome = (
+        "No write was submitted by this read request."
+        if method in {"GET", "HEAD", "OPTIONS"}
+        else "The write outcome may be unknown. Refresh inventory before retrying; "
+        "this request was not automatically replayed."
+    )
+    return FabricError(
+        f"Fabric network error ({type(exc).__name__}): {reason} {action} "
+        f"This is not an Entra sign-in failure. {outcome}",
+        uncertain=method not in {"GET", "HEAD", "OPTIONS"},
+    )
 
 
 def guid(value, label="ID"):
@@ -98,11 +156,7 @@ class FabricClient:
                     **kwargs,
                 )
             except requests.RequestException as exc:
-                raise FabricError(
-                    "Fabric connection failed or timed out. "
-                    "For a write request, its outcome may be unknown; refresh before retrying.",
-                    uncertain=method != "GET",
-                ) from exc
+                raise connection_error(exc, method) from exc
             if response.status_code == 429 and attempt < 2:
                 delay = response.headers.get("Retry-After", "5")
                 if delay.isdigit() and int(delay) <= 30:
@@ -126,12 +180,16 @@ class FabricClient:
                     response.status_code,
                     uncertain=response.status_code >= 500
                     or response.status_code == 408,
+                    error_code=code,
                 )
             return response
         raise FabricError("Fabric throttled this request; retry later.", 429)
 
     def json(self, method, path, **kwargs):
-        response = self.request(method, path, **kwargs)
+        return self.response_json(self.request(method, path, **kwargs))
+
+    @staticmethod
+    def response_json(response):
         try:
             data = response.json()
         except ValueError as exc:
@@ -164,6 +222,110 @@ class FabricClient:
 
     def capacity(self, capacity_id):
         return self.json("GET", f"capacities/{guid(capacity_id)}")
+
+    def item_definition(self, workspace_id, item_id, timeout=90):
+        response = self.request(
+            "POST",
+            f"workspaces/{guid(workspace_id)}/items/{guid(item_id)}/getDefinition",
+        )
+        response = self.operation_result(response, timeout, "Definition export")
+        data = self.response_json(response)
+        definition = data.get("definition")
+        if not isinstance(definition, dict) or not isinstance(
+            definition.get("parts"), list
+        ):
+            raise FabricError("Fabric returned an invalid item definition.")
+        return data
+
+    def operation_result(self, response, timeout, label, uncertain=False):
+        if response.status_code == 202:
+            try:
+                operation_id = guid(
+                    response.headers.get("x-ms-operation-id"), "Operation ID"
+                )
+            except ValueError as exc:
+                raise FabricError(
+                    f"{label} was accepted without a valid operation ID.",
+                    uncertain=uncertain,
+                ) from exc
+            deadline = self.clock() + timeout
+            while True:
+                delay = response.headers.get("Retry-After", "2")
+                if not delay.isdigit():
+                    raise FabricError(
+                        f"{label} returned an invalid Retry-After.", uncertain=uncertain
+                    )
+                delay = max(1, int(delay))
+                if self.clock() + delay >= deadline:
+                    raise FabricError(
+                        f"{label} exceeded its polling deadline; verify the operation before retrying.",
+                        uncertain=uncertain,
+                    )
+                self.sleep(delay)
+                try:
+                    response = self.request("GET", f"operations/{operation_id}")
+                    state = self.response_json(response)
+                except FabricError as exc:
+                    raise FabricError(
+                        f"{label} accepted; status could not be verified: {exc}",
+                        exc.status,
+                        uncertain=uncertain,
+                        error_code=exc.error_code,
+                    ) from exc
+                status = state.get("status")
+                if status == "Succeeded":
+                    try:
+                        response = self.request(
+                            "GET", f"operations/{operation_id}/result"
+                        )
+                    except FabricError as exc:
+                        raise FabricError(
+                            f"{label} succeeded but its result could not be retrieved: {exc}",
+                            exc.status,
+                            uncertain=uncertain,
+                            error_code=exc.error_code,
+                        ) from exc
+                    break
+                if status in {"Failed", "Canceled", "Cancelled"}:
+                    error = state.get("error")
+                    raise FabricError(
+                        f"{label} operation {status}.",
+                        error_code=error.get("errorCode")
+                        if isinstance(error, dict)
+                        else None,
+                    )
+                if status not in {"NotStarted", "Running"}:
+                    raise FabricError(
+                        f"{label} returned an unknown operation status.",
+                        uncertain=uncertain,
+                    )
+        return response
+
+    def create_item(self, workspace_id, payload, timeout=90):
+        workspace_id = guid(workspace_id)
+        response = self.request(
+            "POST", f"workspaces/{workspace_id}/items", json=payload
+        )
+        if response.status_code not in {201, 202}:
+            raise FabricError(
+                "Item creation returned an unexpected status.", uncertain=True
+            )
+        response = self.operation_result(
+            response, timeout, "Item creation", uncertain=True
+        )
+        try:
+            data = self.response_json(response)
+            data["id"] = guid(data.get("id"), "Created item ID")
+        except (FabricError, ValueError) as exc:
+            raise FabricError(
+                "Item creation may have succeeded but returned an invalid result. Verify destination inventory.",
+                uncertain=True,
+            ) from exc
+        if data.get("workspaceId") and str(data["workspaceId"]).lower() != workspace_id:
+            raise FabricError(
+                "Item creation returned a different workspace ID.", uncertain=True
+            )
+        return data
 
     def inventory(self, workspace_ids):
         workspaces = {

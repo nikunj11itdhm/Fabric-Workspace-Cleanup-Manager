@@ -1,3 +1,4 @@
+import socket
 from unittest.mock import Mock, call
 
 import pytest
@@ -32,6 +33,153 @@ def assignment_client(workspaces, post_error=None):
 def test_csv_normalizes_bom_headers_and_duplicates():
     content = f"\ufeff Workspace ID ,other\n{PRIMARY.upper()},a\n {PRIMARY} ,b\n{WORKSPACE},c\n"
     assert parse_workspace_csv(content.encode()) == [PRIMARY, WORKSPACE]
+
+
+def test_definition_export_preserves_immediate_result():
+    transport = Mock()
+    data = {"definition": {"parts": []}}
+    transport.request.return_value = response(data=data)
+    api = FabricClient(lambda: "token", transport=transport)
+    assert api.item_definition(WORKSPACE, ITEM) == data
+    assert transport.request.call_args.args == (
+        "POST",
+        API_ROOT + f"workspaces/{WORKSPACE}/items/{ITEM}/getDefinition",
+    )
+
+
+def test_definition_export_polls_only_fixed_fabric_operation_paths():
+    transport = Mock()
+    data = {"definition": {"parts": []}}
+    transport.request.side_effect = [
+        response(
+            202,
+            headers={
+                "x-ms-operation-id": PRIMARY,
+                "Retry-After": "1",
+                "Location": "https://untrusted.invalid",
+            },
+        ),
+        response(data={"status": "Running"}, headers={"Retry-After": "2"}),
+        response(data={"status": "Succeeded"}),
+        response(data=data),
+    ]
+    sleep = Mock()
+    api = FabricClient(lambda: "token", transport=transport, sleep=sleep)
+    assert api.item_definition(WORKSPACE, ITEM) == data
+    paths = [call.args[1] for call in transport.request.call_args_list]
+    assert paths[1:] == [
+        API_ROOT + f"operations/{PRIMARY}",
+        API_ROOT + f"operations/{PRIMARY}",
+        API_ROOT + f"operations/{PRIMARY}/result",
+    ]
+    assert sleep.call_args_list == [call(1), call(2)]
+
+
+@pytest.mark.parametrize(
+    ("headers", "message"),
+    [
+        ({"Location": "https://untrusted.invalid"}, "operation ID"),
+        ({"x-ms-operation-id": PRIMARY, "Retry-After": "999"}, "deadline"),
+    ],
+)
+def test_definition_export_rejects_missing_operation_id_and_excessive_poll_wait(
+    headers, message
+):
+    transport = Mock()
+    transport.request.return_value = response(202, headers=headers)
+    api = FabricClient(lambda: "token", transport=transport)
+    with pytest.raises(FabricError, match=message):
+        api.item_definition(WORKSPACE, ITEM)
+    assert transport.request.call_count == 1
+
+
+def test_definition_export_operation_failure_is_not_saved_as_definition():
+    transport = Mock()
+    transport.request.side_effect = [
+        response(202, headers={"x-ms-operation-id": PRIMARY, "Retry-After": "1"}),
+        response(
+            data={
+                "status": "Failed",
+                "error": {"errorCode": "OperationNotSupportedForItem"},
+            }
+        ),
+    ]
+    api = FabricClient(lambda: "token", transport=transport, sleep=Mock())
+    with pytest.raises(FabricError) as error:
+        api.item_definition(WORKSPACE, ITEM)
+    assert error.value.error_code == "OperationNotSupportedForItem"
+
+
+def test_definition_export_running_operation_stops_at_polling_deadline():
+    transport = Mock()
+    transport.request.side_effect = [
+        response(202, headers={"x-ms-operation-id": PRIMARY, "Retry-After": "1"}),
+        response(data={"status": "Running"}, headers={"Retry-After": "1"}),
+    ]
+    clock = Mock(side_effect=[0, 0, 90])
+    api = FabricClient(lambda: "token", transport=transport, sleep=Mock(), clock=clock)
+    with pytest.raises(FabricError, match="deadline"):
+        api.item_definition(WORKSPACE, ITEM)
+    assert transport.request.call_count == 2
+
+
+def test_definition_export_rejects_malformed_result():
+    transport = Mock()
+    transport.request.return_value = response(data={"definition": {"parts": None}})
+    api = FabricClient(lambda: "token", transport=transport)
+    with pytest.raises(FabricError, match="invalid item definition"):
+        api.item_definition(WORKSPACE, ITEM)
+
+
+def test_definition_unsupported_api_error_retains_machine_readable_code():
+    transport = Mock()
+    transport.request.return_value = response(
+        400, {"errorCode": "OperationNotSupportedForItem", "message": "Unsupported"}
+    )
+    api = FabricClient(lambda: "token", transport=transport)
+    with pytest.raises(FabricError) as error:
+        api.item_definition(WORKSPACE, ITEM)
+    assert error.value.error_code == "OperationNotSupportedForItem"
+
+
+def test_create_item_handles_async_result_and_returns_new_id():
+    transport = Mock()
+    transport.request.side_effect = [
+        response(202, headers={"x-ms-operation-id": PRIMARY, "Retry-After": "1"}),
+        response(data={"status": "Succeeded"}),
+        response(data={"id": OTHER_ITEM, "workspaceId": WORKSPACE}),
+    ]
+    api = FabricClient(lambda: "token", transport=transport, sleep=Mock())
+    payload = {"displayName": "Demo", "type": "Notebook", "definition": {"parts": []}}
+    assert api.create_item(WORKSPACE, payload)["id"] == OTHER_ITEM
+    assert transport.request.call_args_list[0].kwargs["json"] == payload
+    assert (
+        transport.request.call_args_list[0].args[1]
+        == API_ROOT + f"workspaces/{WORKSPACE}/items"
+    )
+
+
+def test_create_item_polling_failure_remains_uncertain_and_is_not_resubmitted():
+    transport = Mock()
+    transport.request.side_effect = [
+        response(202, headers={"x-ms-operation-id": PRIMARY, "Retry-After": "1"}),
+        requests.exceptions.Timeout(),
+    ]
+    api = FabricClient(lambda: "token", transport=transport, sleep=Mock())
+    with pytest.raises(FabricError) as error:
+        api.create_item(WORKSPACE, {})
+    assert error.value.uncertain
+    assert transport.request.call_count == 2
+
+
+def test_create_item_invalid_success_result_is_uncertain():
+    transport = Mock()
+    transport.request.return_value = response(201, {"id": None})
+    api = FabricClient(lambda: "token", transport=transport)
+    with pytest.raises(FabricError) as error:
+        api.create_item(WORKSPACE, {})
+    assert error.value.uncertain
+    assert transport.request.call_count == 1
 
 
 @pytest.mark.parametrize(
@@ -261,6 +409,46 @@ def test_transport_timeout_is_not_blindly_retried():
     with pytest.raises(FabricError) as error:
         api.request("POST", "workspaces")
     assert error.value.uncertain
+    assert transport.request.call_count == 1
+
+
+@pytest.mark.parametrize(
+    ("failure", "message"),
+    [
+        (
+            requests.exceptions.ProxyError("https://user:private@proxy.invalid"),
+            "configured proxy",
+        ),
+        (
+            requests.exceptions.SSLError("private diagnostics"),
+            "certificate verification",
+        ),
+        (requests.exceptions.ConnectTimeout("private diagnostics"), "timed out"),
+        (requests.exceptions.ReadTimeout("private diagnostics"), "timed out"),
+        (
+            requests.exceptions.ConnectionError("private diagnostics"),
+            "Could not connect",
+        ),
+        (
+            requests.exceptions.ConnectionError(socket.gaierror("private diagnostics")),
+            "DNS",
+        ),
+    ],
+)
+def test_network_failure_reports_actionable_category_without_private_details(
+    failure, message
+):
+    transport = Mock()
+    transport.request.side_effect = failure
+    api = FabricClient(lambda: "token", transport=transport)
+    with pytest.raises(FabricError) as error:
+        api.request("GET", "admin/workspaces")
+    assert message in str(error.value)
+    assert type(failure).__name__ in str(error.value)
+    assert "private" not in str(error.value)
+    assert "not an Entra sign-in failure" in str(error.value)
+    assert "No write was submitted" in str(error.value)
+    assert not error.value.uncertain
     assert transport.request.call_count == 1
 
 
