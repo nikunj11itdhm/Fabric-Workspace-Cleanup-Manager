@@ -2,6 +2,7 @@ import io
 import json
 import time
 from unittest.mock import Mock
+from uuid import UUID
 from zipfile import ZipFile
 
 import pytest
@@ -26,11 +27,345 @@ def context():
     state["account"] = {"home_account_id": "test"}
     state["user"] = "Test Administrator"
     state["workspaces"] = [WORKSPACE]
+    state["csv_workspaces"] = [WORKSPACE]
+    state["workspace_source"] = "imported"
     return app, client, state, api
 
 
 def headers(state):
     return {"X-CSRF-Token": state["csrf"]}
+
+
+def start_dashboard_scan(client, state, api):
+    state["csv_workspaces"] = list(state["workspaces"])
+    api.inventory.return_value = {
+        "workspaces": [
+            {"id": value, "name": "Demo", "state": "Active", "status": "Not assigned"}
+            for value in state["workspaces"]
+        ]
+    }
+    return client.post("/api/dashboard/scan", headers=headers(state))
+
+
+def test_tenant_scan_without_csv_loads_all_discovered_workspaces_and_records_tenant(
+    context,
+):
+    _, client, state, api = context
+    state["workspaces"] = []
+    state["csv_workspaces"] = []
+    state["workspace_source"] = "none"
+    state["account"]["tenantId"] = TENANT
+    api.inventory.return_value = {
+        "workspaces": [
+            {
+                "id": WORKSPACE,
+                "name": "First",
+                "state": "Active",
+                "status": "Not assigned",
+            },
+            {
+                "id": OTHER,
+                "name": "Second",
+                "state": "Active",
+                "status": "Not assigned",
+            },
+        ],
+        "capacities": [],
+    }
+    started = client.post(
+        "/api/dashboard/scan", json={"scope": "tenant"}, headers=headers(state)
+    )
+    assert started.status_code == 200
+    api.inventory.assert_called_once_with(None)
+    assert state["workspaces"] == [WORKSPACE, OTHER]
+    assert state["csv_workspaces"] == []
+    assert started.json["workspaceCount"] == 2 and started.json["importedCount"] == 0
+    assert started.json["scan"]["scope"] == "tenant"
+    assert started.json["scan"]["tenantId"] == TENANT
+    assert len(started.json["inventory"]["workspaces"]) == 2
+    api.items.return_value = []
+    assert client.get(f"/api/workspaces/{OTHER}/items").status_code == 200
+    api.delete_snapshot.assert_not_called()
+    api.assign.assert_not_called()
+
+
+def test_tenant_scan_has_no_500_workspace_csv_limit_and_preserves_saved_csv(context):
+    _, client, state, api = context
+    discovered = [
+        {
+            "id": str(UUID(int=index + 1)),
+            "name": f"Workspace {index}",
+            "state": "Active",
+        }
+        for index in range(501)
+    ]
+    api.inventory.return_value = {"workspaces": discovered, "capacities": []}
+    started = client.post(
+        "/api/dashboard/scan", json={"scope": "tenant"}, headers=headers(state)
+    )
+    assert started.status_code == 200
+    assert started.json["workspaceCount"] == 501
+    assert len(started.json["scan"]["workspaces"]) == 501
+    assert state["csv_workspaces"] == [WORKSPACE]
+    api.inventory.return_value = {
+        "workspaces": [{"id": WORKSPACE, "name": "CSV workspace", "state": "Active"}],
+        "capacities": [],
+    }
+    csv_scan = client.post(
+        "/api/dashboard/scan", json={"scope": "imported"}, headers=headers(state)
+    )
+    assert csv_scan.status_code == 200
+    api.inventory.assert_called_with([WORKSPACE])
+    assert state["workspaces"] == [WORKSPACE]
+    assert csv_scan.json["scan"]["scope"] == "imported"
+    assert csv_scan.json["scan"]["id"] != started.json["scan"]["id"]
+
+
+def test_tenant_discovery_failure_does_not_replace_loaded_scope_with_silent_subset(
+    context,
+):
+    _, client, state, api = context
+    api.inventory.side_effect = FabricError("Tenant inventory permission denied", 403)
+    response = client.post(
+        "/api/dashboard/scan", json={"scope": "tenant"}, headers=headers(state)
+    )
+    assert response.status_code == 403
+    assert "permission denied" in response.json["error"]
+    assert state["workspaces"] == [WORKSPACE]
+    assert state["csv_workspaces"] == [WORKSPACE]
+    assert state["workspace_source"] == "imported"
+    assert state["scan"] is None
+
+
+def test_empty_tenant_scope_completes_explicitly_without_csv(context):
+    _, client, state, api = context
+    api.inventory.return_value = {"workspaces": [], "capacities": []}
+    response = client.post(
+        "/api/dashboard/scan", json={"scope": "tenant"}, headers=headers(state)
+    )
+    assert response.status_code == 200
+    assert response.json["summary"]["workspaceCount"] == 0
+    assert response.json["summary"]["healthScore"] is None
+    assert response.json["summary"]["status"] == "complete"
+    assert response.json["scan"]["finishedAtUtc"]
+    assert state["workspaces"] == []
+    assert client.get("/api/inventory").status_code == 200
+    api.workspace.assert_not_called()
+
+
+def test_scan_scope_validation_and_optional_csv_are_explicit(context):
+    _, client, state, api = context
+    for scope in ["other", [], None]:
+        assert (
+            client.post(
+                "/api/dashboard/scan", json={"scope": scope}, headers=headers(state)
+            ).status_code
+            == 400
+        )
+    state["csv_workspaces"] = []
+    assert (
+        client.post(
+            "/api/dashboard/scan", json={"scope": "imported"}, headers=headers(state)
+        ).status_code
+        == 400
+    )
+    api.inventory.assert_not_called()
+
+
+def test_dashboard_requires_login_and_csrf_and_is_session_scoped(context):
+    _, client, state, api = context
+    assert client.post("/api/dashboard/scan").status_code == 403
+    state.pop("account")
+    assert client.get("/api/dashboard").status_code == 401
+    assert (
+        client.post("/api/dashboard/report", headers=headers(state)).status_code == 401
+    )
+    api.inventory.assert_not_called()
+
+
+def test_scan_and_report_use_real_inventory_checks_without_writes(context):
+    app, client, state, api = context
+    api.workspace.return_value = {"description": "Useful workspace"}
+    api.pages.side_effect = [
+        [],
+        [
+            {
+                "id": ITEM,
+                "displayName": "<script>Report</script>",
+                "type": "Report",
+                "description": "",
+            }
+        ],
+    ]
+    started = start_dashboard_scan(client, state, api)
+    assert started.status_code == 200
+    assert started.json["summary"]["healthScore"] is None
+    scan_id = started.json["scan"]["id"]
+    scanned = client.post(
+        f"/api/dashboard/scan/{WORKSPACE}",
+        json={"scanId": scan_id},
+        headers=headers(state),
+    )
+    assert scanned.status_code == 200
+    assert scanned.json["summary"]["status"] == "complete"
+    assert scanned.json["summary"]["itemCount"] == 1
+    assert scanned.json["summary"]["cleanupReviewFindings"] == 1
+    report = client.post("/api/dashboard/report", headers=headers(state))
+    assert report.status_code == 200 and report.mimetype == "application/json"
+    assert "attachment" in report.headers["Content-Disposition"]
+    assert "no-store" in report.headers["Cache-Control"]
+    assert report.json["summary"]["itemCount"] == 1
+    assert (
+        report.json["scan"]["workspaces"][0]["items"][0]["name"]
+        == "<script>Report</script>"
+    )
+    assert report.json["activity"][0]["kind"] == "report"
+    api.create_item.assert_not_called()
+    api.delete_snapshot.assert_not_called()
+    second = app.test_client()
+    second.get("/")
+    with second.session_transaction() as browser:
+        second_state = app.extensions["local_states"][browser["sid"]]
+        second_state["account"] = {"name": "Another session"}
+    assert second.get("/api/dashboard").json["scan"] is None
+    assert second.get("/api/dashboard").json["activity"] == []
+
+
+def test_scan_rejects_foreign_ids_old_scan_ids_and_duplicate_scan_requests(context):
+    _, client, state, api = context
+    api.workspace.return_value = {"description": "Demo"}
+    api.pages.side_effect = [[], []]
+    started = start_dashboard_scan(client, state, api)
+    url = f"/api/dashboard/scan/{WORKSPACE}"
+    assert (
+        client.post(url, json={"scanId": "old"}, headers=headers(state)).status_code
+        == 409
+    )
+    assert (
+        client.post(
+            f"/api/dashboard/scan/{OTHER}",
+            json={"scanId": started.json["scan"]["id"]},
+            headers=headers(state),
+        ).status_code
+        == 400
+    )
+    body = {"scanId": started.json["scan"]["id"]}
+    assert client.post(url, json=body, headers=headers(state)).status_code == 200
+    assert client.post(url, json=body, headers=headers(state)).status_code == 409
+    assert api.workspace.call_count == 1
+
+
+def test_settings_are_validated_and_clear_scan_and_import_also_clears_scan(context):
+    _, client, state, api = context
+    start_dashboard_scan(client, state, api)
+    assert (
+        client.post(
+            "/api/dashboard/settings",
+            json={"includeItemDescriptions": "false"},
+            headers=headers(state),
+        ).status_code
+        == 400
+    )
+    saved = client.post(
+        "/api/dashboard/settings",
+        json={"includeItemDescriptions": False},
+        headers=headers(state),
+    )
+    assert saved.status_code == 200 and saved.json["scan"] is None
+    assert saved.json["settings"] == {"includeItemDescriptions": False}
+    assert (
+        client.post("/api/dashboard/report", headers=headers(state)).status_code == 400
+    )
+    start_dashboard_scan(client, state, api)
+    imported = client.post(
+        "/api/import",
+        headers=headers(state),
+        data={
+            "file": (io.BytesIO(f"workspace_id\n{OTHER}\n".encode()), "workspaces.csv")
+        },
+    )
+    assert imported.status_code == 200
+    assert state["scan"] is None
+    assert state["activity"][0]["kind"] == "import"
+
+
+def test_stopped_scan_is_partial_and_does_not_continue_after_throttling(context):
+    _, client, state, api = context
+    state["workspaces"] = [WORKSPACE, OTHER]
+    api.workspace.side_effect = FabricError("Throttled", 429)
+    started = start_dashboard_scan(client, state, api)
+    body = {"scanId": started.json["scan"]["id"]}
+    first = client.post(
+        f"/api/dashboard/scan/{WORKSPACE}", json=body, headers=headers(state)
+    )
+    assert first.json["summary"]["status"] == "partial"
+    assert first.json["summary"]["assessedWorkspaces"] == 1
+    assert first.json["scan"]["stopReason"] == "Throttled"
+    assert (
+        client.post(
+            f"/api/dashboard/scan/{OTHER}", json=body, headers=headers(state)
+        ).status_code
+        == 409
+    )
+    api.pages.assert_not_called()
+
+
+def test_assignment_attempt_invalidates_scan_even_when_fabric_fails(context):
+    _, client, state, api = context
+    start_dashboard_scan(client, state, api)
+    api.assign.side_effect = FabricError("Write outcome unknown", uncertain=True)
+    result = client.post(
+        "/api/assign",
+        json={"workspaceIds": [WORKSPACE], "primary": TENANT},
+        headers=headers(state),
+    )
+    assert result.status_code == 200
+    assert state["scan"]["staleReason"]
+    assert state["activity"][0]["kind"] == "assignment"
+
+
+def test_dashboard_navigation_and_rules_render_without_sample_metrics(context):
+    _, client, _, _ = context
+    page = client.get("/").text
+    for view in [
+        "home",
+        "inventory",
+        "cleanup",
+        "backup",
+        "reports",
+        "settings",
+        "about",
+    ]:
+        assert f'id="view-{view}"' in page
+        assert f'data-route="{view}"' in page
+    assert "Rule-based health score" in page
+    assert "No backup is taken automatically" in page
+    assert 'id="metric-score">--' in page
+
+
+def test_activity_is_bounded_and_settings_changes_cannot_resume_old_scan(context):
+    _, client, state, api = context
+    started = start_dashboard_scan(client, state, api)
+    state["activity"] = [
+        {"kind": "old", "atUtc": "2026-11-04T00:00:00Z", "message": "Older event"}
+        for _ in range(50)
+    ]
+    saved = client.post(
+        "/api/dashboard/settings",
+        json={"includeItemDescriptions": False},
+        headers=headers(state),
+    )
+    assert saved.status_code == 200 and len(saved.json["activity"]) == 50
+    assert saved.json["activity"][0]["kind"] == "settings"
+    assert (
+        client.post(
+            f"/api/dashboard/scan/{WORKSPACE}",
+            json={"scanId": started.json["scan"]["id"]},
+            headers=headers(state),
+        ).status_code
+        == 409
+    )
+    api.workspace.assert_not_called()
 
 
 def test_backup_download_contains_inventory_and_definitions(context):

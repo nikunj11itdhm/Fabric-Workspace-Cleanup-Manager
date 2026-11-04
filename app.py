@@ -1,4 +1,6 @@
 import hmac
+import io
+import json
 import logging
 import secrets
 import threading
@@ -21,6 +23,7 @@ from werkzeug.exceptions import HTTPException
 
 from backup import metadata_backup
 from browser_auth import BrowserSession
+from dashboard import scan_workspace, summarize, utc_now
 from fabric import FabricClient, FabricError, guid, parse_workspace_csv
 
 
@@ -67,6 +70,11 @@ def create_app(test_config=None):
                     "csrf": secrets.token_urlsafe(32),
                     "context": secrets.token_urlsafe(16),
                     "workspaces": [],
+                    "csv_workspaces": [],
+                    "workspace_source": "none",
+                    "activity": [],
+                    "settings": {"includeItemDescriptions": True},
+                    "scan": None,
                     "lock": threading.Lock(),
                 }
             g.state = states[sid]
@@ -131,10 +139,33 @@ def create_app(test_config=None):
         )
         return factory(g.state.get("auth"))
 
-    def imported(workspace_id):
+    def activity(kind, message):
+        g.state["activity"].insert(
+            0, {"atUtc": utc_now(), "kind": kind, "message": message}
+        )
+        del g.state["activity"][50:]
+
+    def stale_scan(reason):
+        if g.state.get("scan"):
+            g.state["scan"]["staleReason"] = reason
+
+    def dashboard_state():
+        scan = g.state.get("scan")
+        return {
+            "scan": scan,
+            "summary": summarize(scan) if scan else None,
+            "activity": g.state["activity"],
+            "settings": g.state["settings"],
+            "importedCount": len(g.state["csv_workspaces"]),
+            "workspaceCount": len(g.state["workspaces"]),
+            "workspaceSource": g.state["workspace_source"],
+            "tenantId": g.state.get("account", {}).get("tenantId"),
+        }
+
+    def loaded_workspace(workspace_id):
         workspace_id = guid(workspace_id, "Workspace ID")
         if workspace_id not in g.state["workspaces"]:
-            abort(400, "Workspace must be imported from your CSV first.")
+            abort(400, "Load the workspace through a tenant scan or CSV import first.")
         return workspace_id
 
     def body():
@@ -195,6 +226,8 @@ def create_app(test_config=None):
         g.state.pop("user", None)
         g.state.pop("delete_preview", None)
         g.state["workspaces"] = []
+        g.state["csv_workspaces"] = []
+        g.state["workspace_source"] = "none"
         try:
             auth.start_login(tenant)
         except (FabricError, ValueError):
@@ -249,22 +282,163 @@ def create_app(test_config=None):
             abort(400, "Choose a CSV file.")
         workspace_ids = parse_workspace_csv(file.read())
         g.state["workspaces"] = workspace_ids
+        g.state["csv_workspaces"] = list(workspace_ids)
+        g.state["workspace_source"] = "imported"
         g.state.pop("delete_preview", None)
+        g.state["scan"] = None
+        activity(
+            "import",
+            f"Imported {len(workspace_ids)} workspace IDs; previous scan cleared.",
+        )
         return jsonify(workspaceIds=workspace_ids, count=len(workspace_ids))
 
     @app.get("/api/inventory")
     @signed_in
     @exclusive
     def inventory():
-        if not g.state["workspaces"]:
-            abort(400, "Import a workspace CSV first.")
+        if not g.state["workspaces"] and g.state["workspace_source"] == "none":
+            abort(400, "Scan tenant workspaces or import an optional CSV first.")
         return jsonify(client().inventory(g.state["workspaces"]))
+
+    @app.get("/api/dashboard")
+    @signed_in
+    @exclusive
+    def dashboard():
+        return jsonify(dashboard_state())
+
+    @app.post("/api/dashboard/scan")
+    @signed_in
+    @exclusive
+    def start_scan():
+        data = body() if request.is_json else {}
+        scope = data.get("scope", "imported")
+        if not isinstance(scope, str) or scope not in {"tenant", "imported"}:
+            abort(400, "Scan scope must be tenant or imported.")
+        if scope == "imported" and not g.state["csv_workspaces"]:
+            abort(
+                400,
+                "Import an optional CSV before scanning the CSV scope, or choose the tenant scan.",
+            )
+        stale_scan("A newer scan was requested; its inventory may not have loaded yet.")
+        inventory = client().inventory(
+            None if scope == "tenant" else g.state["csv_workspaces"]
+        )
+        by_id = {row["id"]: row for row in inventory["workspaces"]}
+        workspace_ids = (
+            list(by_id) if scope == "tenant" else list(g.state["csv_workspaces"])
+        )
+        rows = [
+            {
+                **by_id.get(
+                    workspace_id,
+                    {
+                        "id": workspace_id,
+                        "error": True,
+                        "status": "Not found in inventory",
+                    },
+                ),
+                "scanStatus": "pending",
+                "items": [],
+                "checks": [],
+                "findings": [],
+                "errors": [],
+            }
+            for workspace_id in workspace_ids
+        ]
+        g.state["workspaces"] = workspace_ids
+        g.state["workspace_source"] = scope
+        g.state.pop("delete_preview", None)
+        g.state["scan"] = {
+            "id": secrets.token_urlsafe(24),
+            "startedAtUtc": utc_now(),
+            "finishedAtUtc": None,
+            "staleReason": None,
+            "scope": scope,
+            "tenantId": g.state.get("account", {}).get("tenantId"),
+            "settings": dict(g.state["settings"]),
+            "workspaces": rows,
+        }
+        activity(
+            "scan",
+            f"{'Tenant' if scope == 'tenant' else 'CSV'} scan started for {len(rows)} workspaces.",
+        )
+        if not rows:
+            g.state["scan"]["finishedAtUtc"] = utc_now()
+            activity(
+                "scan",
+                "Tenant scan completed: no workspaces returned by the Admin API.",
+            )
+        return jsonify({**dashboard_state(), "inventory": inventory})
+
+    @app.post("/api/dashboard/scan/<workspace_id>")
+    @signed_in
+    @exclusive
+    def scan_one(workspace_id):
+        workspace_id = loaded_workspace(workspace_id)
+        scan = g.state.get("scan")
+        if not scan or body().get("scanId") != scan["id"]:
+            abort(409, "Scan changed or expired. Start a new scan.")
+        if scan.get("staleReason") or scan.get("stopReason"):
+            abort(409, "Scan stopped or became stale. Start a new scan.")
+        position = next(
+            i for i, row in enumerate(scan["workspaces"]) if row["id"] == workspace_id
+        )
+        previous = scan["workspaces"][position]
+        if previous["scanStatus"] != "pending":
+            abort(409, "Workspace already scanned. Start a new scan to refresh it.")
+        row = scan_workspace(
+            client(), previous, scan["settings"]["includeItemDescriptions"]
+        )
+        scan["workspaces"][position] = row
+        if row.get("stopReason"):
+            scan["stopReason"] = row["stopReason"]
+        summary = summarize(scan)
+        if summary["status"] != "running":
+            scan["finishedAtUtc"] = utc_now()
+            activity(
+                "scan",
+                f"Scan {summary['status']}: {summary['assessedWorkspaces']} of {summary['workspaceCount']} workspaces assessed.",
+            )
+        return jsonify(dashboard_state())
+
+    @app.post("/api/dashboard/settings")
+    @signed_in
+    @exclusive
+    def dashboard_settings():
+        enabled = body().get("includeItemDescriptions")
+        if not isinstance(enabled, bool):
+            abort(400, "includeItemDescriptions must be true or false.")
+        g.state["settings"] = {"includeItemDescriptions": enabled}
+        g.state["scan"] = None
+        activity("settings", "Scan settings saved; previous scan cleared.")
+        return jsonify(dashboard_state())
+
+    @app.post("/api/dashboard/report")
+    @signed_in
+    @exclusive
+    def dashboard_report():
+        if not g.state.get("scan"):
+            abort(400, "Run a scan before downloading a report.")
+        activity("report", "Dashboard scan report generated.")
+        report = {
+            "schemaVersion": 1,
+            "generatedAtUtc": utc_now(),
+            "scope": "Loaded workspace metadata checks only; inspect scan.scope and tenantId. Not a tenant governance or usage audit.",
+            "scoreDefinition": "100 * passed checks / all checks in assessed workspaces; unknown checks do not pass. Pending workspaces excluded; inspect coverage.",
+            **dashboard_state(),
+        }
+        return send_file(
+            io.BytesIO(json.dumps(report, indent=2, ensure_ascii=True).encode()),
+            mimetype="application/json",
+            as_attachment=True,
+            download_name="fabric-workspace-scan-report.json",
+        )
 
     @app.get("/api/workspaces/<workspace_id>/items")
     @signed_in
     @exclusive
     def items(workspace_id):
-        return jsonify(items=client().items(imported(workspace_id)))
+        return jsonify(items=client().items(loaded_workspace(workspace_id)))
 
     @app.post("/api/assign")
     @signed_in
@@ -274,7 +448,7 @@ def create_app(test_config=None):
         ids = data.get("workspaceIds")
         if not isinstance(ids, list) or not ids:
             abort(400, "Select at least one workspace.")
-        workspace_ids = list(dict.fromkeys(imported(value) for value in ids))
+        workspace_ids = list(dict.fromkeys(loaded_workspace(value) for value in ids))
         primary = guid(data.get("primary"), "Primary capacity ID")
         secondary = (
             guid(data["secondary"], "Secondary capacity ID")
@@ -285,6 +459,9 @@ def create_app(test_config=None):
             abort(400, "Primary and secondary capacities must be different.")
         api = client()
         results = []
+        stale_scan(
+            "Capacity assignment attempted after this scan. Rescan for current state."
+        )
         for workspace_id in workspace_ids:
             try:
                 result = api.assign(workspace_id, primary, secondary)
@@ -294,6 +471,10 @@ def create_app(test_config=None):
                 )
                 result = {"status": "failed", "message": str(exc)}
             results.append({"workspaceId": workspace_id, **result})
+        activity(
+            "assignment",
+            f"Trial assignment reviewed for {len(results)} workspaces; inspect operation results.",
+        )
         return jsonify(results=results)
 
     @app.post("/api/backup")
@@ -302,11 +483,15 @@ def create_app(test_config=None):
     def backup():
         ids = body().get("workspaceIds")
         if not isinstance(ids, list) or not ids or len(ids) > 500:
-            abort(400, "Select between 1 and 500 imported workspaces.")
+            abort(400, "Select between 1 and 500 loaded workspaces.")
         if any(not isinstance(value, str) for value in ids):
             abort(400, "Workspace IDs must be strings.")
-        workspace_ids = list(dict.fromkeys(imported(value) for value in ids))
+        workspace_ids = list(dict.fromkeys(loaded_workspace(value) for value in ids))
         archive, manifest = metadata_backup(client(), workspace_ids)
+        activity(
+            "backup",
+            f"Metadata backup {manifest['status']} for {len(workspace_ids)} workspaces.",
+        )
         response = send_file(
             archive,
             mimetype="application/zip",
@@ -320,7 +505,7 @@ def create_app(test_config=None):
     @signed_in
     @exclusive
     def delete_preview(workspace_id):
-        workspace_id = imported(workspace_id)
+        workspace_id = loaded_workspace(workspace_id)
         api = client()
         workspace = api.workspace(workspace_id)
         snapshot = api.cleanup_items(workspace_id)
@@ -333,6 +518,10 @@ def create_app(test_config=None):
             "confirmation": confirmation,
             "expires": time.monotonic() + 300,
         }
+        activity(
+            "cleanup",
+            f"Cleanup preview created for {len(snapshot)} items in workspace {workspace_id}. No items deleted.",
+        )
         return jsonify(
             workspaceId=workspace_id,
             name=workspace.get("displayName", workspace_id),
@@ -345,7 +534,7 @@ def create_app(test_config=None):
     @signed_in
     @exclusive
     def delete_items(workspace_id):
-        workspace_id = imported(workspace_id)
+        workspace_id = loaded_workspace(workspace_id)
         data = body()
         preview = g.state.get("delete_preview")
         if (
@@ -360,7 +549,13 @@ def create_app(test_config=None):
         ):
             abort(400, "Type the exact deletion confirmation phrase.")
         g.state.pop("delete_preview")
-        return jsonify(client().delete_snapshot(workspace_id, preview["items"]))
+        stale_scan("Cleanup attempted after this scan. Rescan for current state.")
+        result = client().delete_snapshot(workspace_id, preview["items"])
+        activity(
+            "cleanup",
+            f"Cleanup {'verified empty' if result.get('complete') else 'requires review'} for workspace {workspace_id}.",
+        )
+        return jsonify(result)
 
     return app
 

@@ -327,12 +327,14 @@ class FabricClient:
             )
         return data
 
-    def inventory(self, workspace_ids):
+    def inventory(self, workspace_ids=None):
         workspaces = {
             guid(w["id"]): w for w in self.pages("admin/workspaces", "workspaces")
         }
         capacities = self.capacities()
         rows = []
+        if workspace_ids is None:
+            workspace_ids = list(workspaces)
         for workspace_id in workspace_ids:
             workspace = workspaces.get(workspace_id)
             if not workspace:

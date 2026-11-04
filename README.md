@@ -5,7 +5,8 @@ assigning them to existing trial capacities, browsing artifacts, and performing
 explicitly confirmed item cleanup without deleting the workspace.
 
 > Python + Flask + Waitress | Microsoft Entra browser sign-in |
-> CSV workspace import | Primary/secondary trial capacities | Confirmed cleanup
+> Evidence-based dashboard | Tenant scan / optional CSV | Metadata backup/restore |
+> Primary/secondary trial capacities | Confirmed cleanup
 
 **Local administration utility, not a production-hosted service.** Capacity
 assignment can move workspaces off paid capacities. Cleanup changes real Fabric
@@ -25,11 +26,14 @@ resources. Back up your data and review the selected workspace before confirming
 
 Account information, resource identifiers, and resource names in these two
 screenshots have been redacted or replaced with demo labels.
+These screenshots show the earlier inventory interface; the current signed-in
+interface adds a navy sidebar and dashboard.
 
 ## Table of contents
 
 - [Overview](#overview)
 - [Key capabilities](#key-capabilities)
+- [Dashboard, health checks and reports](#dashboard-health-checks-and-reports)
 - [Metadata backup](#metadata-backup)
 - [Restore metadata into another environment](#restore-metadata-into-another-environment)
 - [Architecture](#architecture)
@@ -50,7 +54,8 @@ screenshots have been redacted or replaced with demo labels.
 
 ## Overview
 
-Import workspace IDs from a CSV, inspect their current capacity, and perform
+Scan workspaces in the signed-in tenant, or optionally import a CSV for a smaller
+scope, inspect their current capacity, and perform
 operations using the permissions of the signed-in Microsoft Entra user.
 Authentication and imported data remain in server memory for the web session.
 
@@ -61,7 +66,7 @@ Authentication and imported data remain in server memory for the web session.
 | Azure Identity | Interactive browser sign-in and in-memory token refresh |
 | Fabric REST client | Paginated workspace, item, and capacity requests |
 | Vanilla JavaScript / CSS | Workspace selection, artifact tables, and confirmations |
-| CSV upload | Supplies the workspace IDs to inspect |
+| Optional CSV upload | Supplies a narrower set of workspace IDs to inspect |
 | pytest / Ruff / Node.js tests | Backend, lint, formatting, and frontend validation |
 
 This repository contains source code, tests, and placeholder CSV data. It does
@@ -70,13 +75,23 @@ screenshots of signed-in tenant data.
 
 ## Key capabilities
 
+### Session dashboard
+
+- Home, Inventory, Cleanup, Backup / Restore, Reports, Settings and About views.
+- Real loaded-workspace and observed artifact counts, grouped by artifact type.
+- Tenant-wide discovery without a CSV, with a separate optional saved CSV scope.
+- Explicit workspace scans with per-workspace progress and partial/error coverage.
+- Transparent rule-based health, review recommendations, session activity and JSON reports.
+- No invented sample metrics, storage sizes, usage claims or automatic cleanup.
+
 ### Workspace and artifact inventory
 
-- Import up to 500 unique workspace UUIDs from a UTF-8 CSV.
+- Discover all paginated Admin workspace results for the signed-in tenant.
+- Optionally import up to 500 unique workspace UUIDs from a UTF-8 CSV.
 - Normalize and deduplicate IDs; reject invalid imports without partial changes.
 - Display workspace names, capacity names, available SKUs, and trial status.
 - Browse artifact names, types, and IDs for an individual workspace.
-- Under **04 / EXPLORE**, filter imported workspaces by name or ID and choose
+- Under **04 / EXPLORE**, filter loaded workspaces by name or ID and choose
   one from the workspace dropdown to load its artifacts. This does not change
   the workspace selections used for assignment or metadata backup.
 - Retrieve all API result pages instead of displaying only the first page.
@@ -117,9 +132,96 @@ screenshots of signed-in tenant data.
 - Return an explicit error if interaction becomes necessary again.
 - Refresh CSRF tokens before writes and block actions from changed sessions.
 
+## Dashboard, health checks and reports
+
+The signed-in **Home** view uses a sidebar and summary cards. Click **Scan tenant
+workspaces** to discover and scan all workspaces returned by the paginated Fabric
+Admin API for the tenant verified during Entra sign-in. **No CSV is required.**
+The signed-in tenant ID is displayed; sign out and sign in again to change tenants.
+Tenant discovery is not subject to the 500-workspace CSV import limit.
+
+For a narrower scope, optionally import a CSV under **Inventory**, then choose
+**Scan CSV workspaces** on Home. The saved CSV scope is retained separately when
+you scan the tenant, so you can switch back without uploading again. A successful
+discovery replaces the loaded workspace list used by Inventory, Explore and
+workspace operations. Selection does not automatically assign, back up or delete.
+
+The scan reads metadata only; it does not fetch definitions, assign capacities,
+or delete anything. Each workspace is scanned sequentially, with progress shown.
+API pages are fetched through the existing paginated client. Large tenants can
+take time and consume Admin/Core API quotas; scans never run automatically.
+An authentication failure or exhausted 429 retry stops further workspace scans.
+
+The dashboard identifies whether its current scan uses the **tenant** or **CSV**
+scope. Tenant inventory requires the Fabric administrator role; that role does
+not automatically grant per-workspace or per-item access. Inaccessible items
+and failed workspace scans remain explicit errors, not silently excluded results.
+It shows recognized trial assignments, active workspace state from scan inventory,
+deduplicated Admin/Core item counts, and artifact-type totals. Counts from partial
+scans are explicitly marked as observed lower bounds. Storage size is **Not
+measured**. Inventory sources may lag or change during a scan; this is not an
+atomic snapshot or a complete view of every Fabric-managed object.
+
+### Transparent health rules
+
+Each check has equal weight:
+
+| Check | Passing evidence |
+| --- | --- |
+| Workspace metadata access | Workspace details read successfully |
+| Admin inventory access | Every Admin item page read successfully |
+| Core inventory access | Every recursive Core item page read successfully |
+| Capacity metadata | Assigned capacity SKU known, or workspace is unassigned |
+| Nonempty workspace | At least one artifact observed and both inventories succeeded |
+| Workspace description | Description field returned and nonblank |
+| Artifact descriptions (optional) | One check per artifact with a nonblank returned description |
+
+**Rule-based health score = 100 x passing checks / all checks in assessed
+workspaces.** Unknown checks do not pass; workspaces not yet scanned are excluded.
+The UI/report shows assessed workspace coverage, check totals and unknown evidence.
+An omitted description field is **unknown**, never assumed empty. A failed
+inventory is never interpreted as an empty workspace. Paid capacity is not a
+failure, and unassigned capacity is not classified as an unknown SKU.
+
+Health groups use this priority: **Scan errors**, **Not assessed / unknown**,
+**Needs review** (known failed checks), otherwise **Healthy** under these checks.
+This is not a Microsoft governance score, security/compliance assessment, or
+certification. It does not measure activity, item age, ownership or actual usage.
+
+**Cleanup review findings** count empty workspaces and explicitly blank
+workspace/artifact descriptions. These are review prompts, not unused items or
+permission to delete. Unknown capacity/access issues generate separate review
+recommendations. No automatic archive, backup, reference remapping or deletion
+is triggered by a finding.
+
+### Activity, reports and session settings
+
+- **Recent activity** displays the latest eight of up to 50 events retained in
+  this app session: CSV imports, scan completions, backups, assignment attempts,
+  cleanup previews/results and report generation. This is not a tenant audit log.
+- **Reports** downloads the current scan as JSON, including workspace/item
+  metadata, scan scope and tenant ID, every check, errors, coverage, timestamps,
+  settings and activity.
+  Protect resource identifiers; reports include no definition payloads or tokens.
+- Assignment/cleanup attempts mark the current snapshot **stale**, including
+  uncertain write outcomes. Run another scan for current evidence. External
+  changes are not detected automatically; always inspect timestamps.
+- **Settings** can enable/disable artifact-description checks. Saving or importing
+  another CSV clears the previous scan; old scan requests cannot continue against
+  the new settings/import.
+- Dashboard snapshots, settings and activity stay in the authenticated server
+  session memory and clear on sign-out, expiry or restart. Page reloads can
+  rehydrate the session without starting a new scan.
+- **Cleanup** provides a workspace preview and review-finding list. Deletion still
+  requires the exact phrase and the existing single-use snapshot confirmation.
+  Metadata backup is a separate explicit action, not an automatic safety guarantee.
+- **Backup / Restore** retains the existing selected-workspace ZIP download and
+  documents the standalone restore helper. **About** describes the app's scope.
+
 ## Metadata backup
 
-1. Sign in, import your workspace CSV, and select the workspaces to export.
+1. Sign in and scan tenant workspaces, or import an optional CSV under **Inventory**.
+   In Inventory, select the workspaces to export (maximum 500 per backup request).
 2. Click **Back up selected metadata** and keep the page open until download starts.
 3. Save `fabric-metadata-backup.zip` securely and inspect its `manifest.json`.
    A `partial` status means metadata or definitions are missing; review each
@@ -390,9 +492,10 @@ The application does not create, purchase, or renew a Fabric trial.
 No client ID or secret is entered in the UI. Organizational consent and access
 requirements still apply.
 
-### 7. Prepare and import workspace IDs
+### 7. Scan the tenant or optionally import workspace IDs
 
-Create your own CSV using the format in
+On **Home**, click **Scan tenant workspaces**. No CSV is needed.
+To limit the scope instead, create your own CSV using the format in
 [Prepare your workspace CSV](#prepare-your-workspace-csv). Choose the file and
 click **Import and inspect**.
 
@@ -450,6 +553,9 @@ bypass organization policy, MFA, API permissions, or service throttling.
 
 ## Prepare your workspace CSV
 
+CSV import is optional. Use **Home > Scan tenant workspaces** to discover the
+tenant's workspaces without preparing a file.
+
 Use UTF-8 encoding and one workspace UUID per row:
 
 ```csv
@@ -482,7 +588,8 @@ the bundled placeholder sample to help prevent accidental publication.
 
 ### Inspect workspaces and artifacts
 
-1. Sign in and import your CSV.
+1. Sign in and click **Scan tenant workspaces** on Home, then open **Inventory**.
+   Alternatively, import an optional CSV in Inventory for a narrower scope.
 2. Review workspace names, capacity information, and trial classification.
 3. Click **Artifacts** on a workspace to fetch its item names, types, and IDs.
 4. Use **Refresh inventory** when you need updated workspace metadata.
@@ -535,8 +642,8 @@ for an unsupported item.
 | `.\.venv\Scripts\python.exe -m pytest -q` | Run backend tests |
 | `.\.venv\Scripts\python.exe -m ruff check .` | Lint Python |
 | `.\.venv\Scripts\python.exe -m ruff format --check .` | Check Python formatting |
-| `node --check .\static\app.js` | Check frontend JavaScript syntax |
-| `node --test .\tests\frontend.test.cjs` | Run frontend tests |
+| `node --check .\static\app.js; node --check .\static\dashboard.js` | Check frontend JavaScript syntax |
+| `node --test .\tests\frontend.test.cjs .\tests\dashboard.test.cjs` | Run frontend tests |
 
 No npm install, frontend build, database migration, or `.env` file is needed.
 Node.js is only needed for development validation.
@@ -548,6 +655,7 @@ Fabric-Workspace-Cleanup-Manager/
 |-- app.py                    # Web routes, sessions, CSRF, operation handlers
 |-- browser_auth.py           # Session-bound browser credential
 |-- backup.py                 # Metadata ZIP and partial-export manifest
+|-- dashboard.py              # Metadata scan, transparent health and summaries
 |-- fabric.py                 # CSV parsing and Fabric API operations
 |-- restore_metadata.py       # Preview/create-only cross-environment restore
 |-- requirements.txt          # Runtime Python libraries
@@ -561,6 +669,7 @@ Fabric-Workspace-Cleanup-Manager/
 |   `-- index.html            # Login and management screens
 |-- static/
 |   |-- app.js                # UI actions and token refresh
+|   |-- dashboard.js          # Sidebar, scan progress, health, reports and settings
 |   |-- microsoft-fabric.svg  # Official connected-platform icon
 |   `-- style.css             # Responsive styling
 |-- tests/
@@ -568,6 +677,8 @@ Fabric-Workspace-Cleanup-Manager/
 |   |-- test_browser_auth.py  # Credential reuse and authentication errors
 |   |-- test_fabric.py        # Pagination, fallback, CSV, cleanup
 |   |-- test_backup.py        # Metadata archive and partial exports
+|   |-- test_dashboard.py     # Evidence-based checks, partial coverage and scoring
+|   |-- dashboard.test.cjs    # Dashboard navigation, rendering and reports
 |   |-- test_restore_metadata.py # Restore validation, preview, and safe creation
 |   `-- frontend.test.cjs     # Upload and stale-session frontend behavior
 |-- .gitignore
@@ -590,13 +701,17 @@ Run:
 .\.venv\Scripts\python.exe -m ruff format --check .
 .\.venv\Scripts\python.exe -m pip check
 node --check .\static\app.js
-node --test .\tests\frontend.test.cjs
+node --check .\static\dashboard.js
+node --test .\tests\frontend.test.cjs .\tests\dashboard.test.cjs
 ```
 
 Backend tests cover CSV validation, pagination, trial assignment fallback,
 unknown outcomes, confirmed deletion, session isolation, consent errors, and
 silent-only token acquisition. Frontend tests cover fresh-token multipart
-uploads, changed sessions, JSON submission, and avoiding mutation replay.
+uploads, changed sessions, JSON submission, avoiding mutation replay, sidebar
+navigation, partial/stale scan rendering and report downloads. Dashboard tests
+also cover evidence-based scores, unknown fields, settings invalidation,
+per-session activity/report isolation, and stopped scans.
 
 Tests use mocks where authentication or Fabric resources would otherwise be
 required. They do not authenticate a tenant or mutate Fabric resources.

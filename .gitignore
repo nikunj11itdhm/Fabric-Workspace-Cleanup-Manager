@@ -16,5 +16,6 @@ __pycache__/
 *.webp
 local-data/
 *.zip
+fabric-workspace-scan-report*.json
 .coverage
 htmlcov/

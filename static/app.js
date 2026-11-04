@@ -17,7 +17,7 @@ function notice(message, kind = "") {
 
 async function requestJson(path, options = {}, responseType = "json") {
   const response = await fetch(path, { ...options, credentials: "same-origin", cache: "no-store" });
-  if (response.ok && responseType === "zip") return response;
+  if (response.ok && ["zip", "download"].includes(responseType)) return response;
   let data;
   try {
     data = await response.json();
@@ -67,10 +67,19 @@ async function downloadMetadataBackup(ids) {
     throw new Error("The server did not return a metadata ZIP. No backup was downloaded.");
   }
   const blob = await response.blob();
+  saveDownload(blob, "fabric-metadata-backup.zip");
+  const partial = response.headers.get("X-Backup-Status") !== "complete";
+  notice(partial
+    ? "Partial metadata ZIP download started. Some inventory or definitions could not be exported. Review manifest.json before relying on this backup."
+    : "Metadata ZIP download started. Review manifest.json. This does not back up actual data or guarantee restoration.",
+  partial ? "error" : "");
+}
+
+function saveDownload(blob, filename) {
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
-  link.download = "fabric-metadata-backup.zip";
+  link.download = filename;
   document.body.appendChild(link);
   try {
     link.click();
@@ -78,11 +87,6 @@ async function downloadMetadataBackup(ids) {
     link.remove();
     window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
-  const partial = response.headers.get("X-Backup-Status") !== "complete";
-  notice(partial
-    ? "Partial metadata ZIP download started. Some inventory or definitions could not be exported. Review manifest.json before relying on this backup."
-    : "Metadata ZIP download started. Review manifest.json. This does not back up actual data or guarantee restoration.",
-  partial ? "error" : "");
 }
 
 $("reload-session").addEventListener("click", () => window.location.reload());
@@ -113,6 +117,13 @@ async function operation(message, action) {
     notice(error.message, "error");
     $("reload-session").hidden = !error.reload;
   } finally {
+    if (typeof refreshDashboardState === "function" && $("dashboard-scan")) {
+      try {
+        await refreshDashboardState();
+      } catch (error) {
+        notice(`${$("notice").textContent} Dashboard could not refresh: ${error.message}`, "error");
+      }
+    }
     busy = false;
     disabled.forEach((value, el) => { if (el.isConnected) el.disabled = value; });
     if ($("explore-workspace")) {
@@ -186,7 +197,7 @@ function renderExploreWorkspaces() {
   select.value = keepSelection ? selected : "";
   if (!keepSelection) clearExploreArtifacts();
   select.disabled = busy || !matches.some((workspace) => !workspace.error && workspace.state === "Active");
-  $("explore-workspace-count").textContent = `${matches.length} of ${workspaceRows.length} imported workspaces shown.`;
+  $("explore-workspace-count").textContent = `${matches.length} of ${workspaceRows.length} loaded workspaces shown.`;
 }
 
 function selectExploreWorkspace(workspaceId) {
@@ -200,7 +211,7 @@ function selectExploreWorkspace(workspaceId) {
 async function loadWorkspaceArtifacts(workspaceId) {
   const workspace = workspaceRows.find((row) => row.id === workspaceId);
   if (!workspace || workspace.error || workspace.state !== "Active") {
-    throw new Error("Choose an available workspace from the imported inventory.");
+    throw new Error("Choose an available workspace from the loaded inventory.");
   }
   selectExploreWorkspace(workspaceId);
   $("artifact-title").textContent = `Artifacts / ${workspace.name}`;
@@ -211,6 +222,18 @@ async function loadWorkspaceArtifacts(workspaceId) {
   itemTable("items", result.items);
   notice(`${result.items.length} artifacts loaded.`);
   $("artifacts-panel").scrollIntoView({ behavior: "smooth" });
+}
+
+async function previewCleanup(workspaceId) {
+  if (!workspaceId) throw new Error("Select an available workspace to preview.");
+  deletion = await api(`/api/workspaces/${workspaceId}/delete-preview`, { method: "POST" });
+  $("delete-workspace").textContent = `${deletion.name} / ${deletion.items.length} items`;
+  $("delete-phrase").textContent = deletion.confirmation;
+  $("delete-confirmation").value = "";
+  $("confirm-delete").disabled = true;
+  itemTable("delete-items", deletion.items);
+  $("delete-dialog").showModal();
+  notice("Review the item list and confirm only if you intend to delete these items.");
 }
 
 if ($("explore-workspace")) {
@@ -281,12 +304,28 @@ if ($("login-form")) {
   }
 }
 
-async function loadInventory() {
-  const data = await api("/api/inventory");
+async function loadInventory(inventory = null) {
+  const data = inventory || await api("/api/inventory");
   workspaceRows = data.workspaces;
   renderExploreWorkspaces();
+  if ($("cleanup-workspace")) {
+    const select = $("cleanup-workspace");
+    const selected = select.value;
+    select.replaceChildren();
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = "Choose a workspace...";
+    select.appendChild(placeholder);
+    for (const workspace of workspaceRows) {
+      const option = document.createElement("option");
+      option.value = workspace.id;
+      option.textContent = `${workspace.name} | ${workspace.id}`;
+      option.disabled = Boolean(workspace.error || workspace.state !== "Active");
+      select.appendChild(option);
+    }
+    select.value = workspaceRows.some((row) => row.id === selected && !row.error && row.state === "Active") ? selected : "";
+  }
   $("workspace-count").textContent = workspaceRows.length;
-  $("import-count").textContent = `${workspaceRows.length} unique workspace IDs imported.`;
   $("select-all").checked = false;
   const tbody = $("workspaces");
   tbody.replaceChildren();
@@ -323,16 +362,7 @@ async function loadInventory() {
       remove.type = "button";
       remove.className = "secondary danger-text";
       remove.textContent = "Delete items";
-      remove.addEventListener("click", () => operation("Preparing deletion preview...", async () => {
-        deletion = await api(`/api/workspaces/${workspace.id}/delete-preview`, { method: "POST" });
-        $("delete-workspace").textContent = `${deletion.name} / ${deletion.items.length} items`;
-        $("delete-phrase").textContent = deletion.confirmation;
-        $("delete-confirmation").value = "";
-        $("confirm-delete").disabled = true;
-        itemTable("delete-items", deletion.items);
-        $("delete-dialog").showModal();
-        notice("Review the item list and confirm only if you intend to delete these items.");
-      }));
+      remove.addEventListener("click", () => operation("Preparing deletion preview...", () => previewCleanup(workspace.id)));
       actions.appendChild(remove);
     }
   }
@@ -353,6 +383,10 @@ if ($("import-form")) {
     operation("Importing CSV and fetching tenant inventory...", async () => {
       const imported = await api("/api/import", { method: "POST", body: form });
       workspaceRows = [];
+      if ($("cleanup-workspace")) {
+        $("cleanup-workspace").replaceChildren();
+        $("cleanup-workspace").value = "";
+      }
       $("explore-search").value = "";
       renderExploreWorkspaces();
       $("workspaces").replaceChildren();

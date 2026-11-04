@@ -227,6 +227,32 @@ def test_pagination_preserves_filters_and_ignores_returned_url():
     assert last.kwargs["allow_redirects"] is False
 
 
+def test_tenant_inventory_discovers_all_workspaces_across_admin_pages_without_csv():
+    transport = Mock()
+    transport.request.side_effect = [
+        response(
+            data={
+                "workspaces": [{"id": WORKSPACE, "name": "First", "state": "Active"}],
+                "continuationToken": "next",
+            }
+        ),
+        response(
+            data={
+                "workspaces": [{"id": OTHER_ITEM, "name": "Second", "state": "Active"}]
+            }
+        ),
+        response(data={"value": []}),
+    ]
+    api = FabricClient(lambda: "token", transport=transport)
+    result = api.inventory()
+    assert [row["id"] for row in result["workspaces"]] == [WORKSPACE, OTHER_ITEM]
+    assert transport.request.call_count == 3
+    assert (
+        transport.request.call_args_list[1].kwargs["params"]["continuationToken"]
+        == "next"
+    )
+
+
 def test_pagination_fails_instead_of_silently_truncating():
     api = FabricClient(lambda: "token")
     api.json = Mock(return_value={"value": [], "continuationToken": "same"})

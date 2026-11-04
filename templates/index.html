@@ -8,8 +8,9 @@
   <title>Fabric Workspace Manager</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
   <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+  <script src="{{ url_for('static', filename='dashboard.js') }}" defer></script>
 </head>
-<body>
+<body{% if user %} class="signed-in"{% endif %}>
   <header>
     <div class="brand"><span class="logo">F</span><div><strong>Fabric Workspace Manager</strong><small>LOCAL ADMIN CONSOLE</small></div></div>
     <div class="identity">
@@ -23,6 +24,19 @@
       {% endif %}
     </div>
   </header>
+  {% if user %}
+  <nav class="sidebar" aria-label="Main navigation">
+    <p class="sidebar-title">WORKSPACE CONSOLE</p>
+    <button type="button" class="nav-link active" data-route="home" aria-current="page"><span aria-hidden="true">&#8962;</span> Home</button>
+    <button type="button" class="nav-link" data-route="inventory"><span aria-hidden="true">&#9638;</span> Inventory</button>
+    <button type="button" class="nav-link" data-route="cleanup"><span aria-hidden="true">&#10003;</span> Cleanup</button>
+    <button type="button" class="nav-link" data-route="backup"><span aria-hidden="true">&#8634;</span> Backup / Restore</button>
+    <button type="button" class="nav-link" data-route="reports"><span aria-hidden="true">&#9776;</span> Reports</button>
+    <button type="button" class="nav-link" data-route="settings"><span aria-hidden="true">&#9881;</span> Settings</button>
+    <button type="button" class="nav-link" data-route="about"><span aria-hidden="true">&#9432;</span> About</button>
+    <p class="sidebar-note">Local session only<br>No automatic deletion</p>
+  </nav>
+  {% endif %}
   <main>
     <div class="page-title"><div><p class="eyebrow product-label"><img class="product-logo" src="{{ url_for('static', filename='microsoft-fabric.svg') }}" width="48" height="48" alt="">MICROSOFT FABRIC</p><h1>Your workspaces. One control panel.</h1><p>Inspect artifacts, back up metadata, manage trial assignments, and clean up workspace items.</p></div></div>
     <div id="notice" role="status" aria-live="polite" hidden></div>
@@ -47,16 +61,35 @@
       </aside>
     </section>
     {% else %}
+    <div id="view-home" class="view-panel">
+      <div class="section-header"><div><p class="eyebrow">OVERVIEW</p><h2>Dashboard</h2><p>Your Fabric. Visible. Reviewed. Ready.</p></div><div class="actions"><button type="button" id="dashboard-scan">Scan tenant workspaces</button><button type="button" class="secondary" id="dashboard-scan-csv">Scan CSV workspaces</button><button type="button" class="secondary" data-route="inventory">Optional CSV import</button></div></div>
+      <p class="muted">Tenant: <code id="scan-tenant">Current Entra sign-in tenant</code>. Sign out to change tenants. Tenant scan loads all workspaces returned by the paginated Fabric Admin API; item access can vary. CSV import is optional.</p>
+      <p id="scan-status" class="scan-status" role="status">Sign in and scan tenant workspaces directly, or optionally import a CSV for a smaller scope.</p>
+      <div class="metric-grid">
+        <section class="metric-card metric-blue"><div><h3>Fabric workspaces</h3><strong id="metric-workspaces">--</strong><p id="metric-workspaces-detail">Signed-in tenant or optional CSV scope</p></div><span class="metric-icon" aria-hidden="true">&#9638;</span></section>
+        <section class="metric-card metric-teal"><div><h3>Trial capacity</h3><strong id="metric-trial">--</strong><p>Recognized trial assignments in scan inventory</p></div><span class="metric-icon" aria-hidden="true">&#9879;</span></section>
+        <section class="metric-card metric-purple"><div><h3>Cleanup review findings</h3><strong id="metric-findings">--</strong><p>Review only; not safe-to-delete or unused items</p></div><span class="metric-icon" aria-hidden="true">&#10003;</span></section>
+        <section class="metric-card metric-slate"><div><h3>Rule-based health score</h3><strong id="metric-score">--</strong><p id="metric-score-detail">Not a governance certification</p></div><span class="metric-icon" aria-hidden="true">&#9672;</span></section>
+      </div>
+      <div class="dashboard-grid">
+        <section class="card"><div class="section-header"><h2>Artifact inventory</h2><span id="metric-items" class="count">Not scanned</span></div><p id="artifact-coverage" class="muted">Counts require a scan. Data sizes and usage are not measured.</p><div class="table-wrap"><table><thead><tr><th>Artifact type</th><th>Count</th><th>Size</th></tr></thead><tbody id="dashboard-types"><tr><td colspan="3" class="empty">Run a scan to load artifact totals.</td></tr></tbody></table></div></section>
+        <section class="card cleanup-summary"><h2>Confirm cleanup</h2><p>Review the exact workspace and item list before removing anything. The workspace itself is retained.</p><p class="warning">Metadata backup is separate and must be requested explicitly. No backup is taken automatically. Metadata export does not back up actual data.</p><div class="actions"><button type="button" class="secondary" data-route="backup">Backup / Restore</button><button type="button" data-route="cleanup">Review cleanup</button></div></section>
+        <section class="card"><h2>Workspace health</h2><p class="muted">Based only on scan access, capacity metadata, emptiness and descriptions.</p><div id="health-bars" class="health-bars"><p class="muted">No scan available.</p></div></section>
+        <section class="card"><h2>Recent activity</h2><p class="muted">Last 50 events in this app session; not a tenant audit log.</p><ol id="recent-activity" class="activity-list"><li>No activity yet.</li></ol></section>
+      </div>
+      <section class="card"><h2>Recommended actions</h2><ul id="recommended-actions" class="recommendations"><li>Scan tenant workspaces, or use an optional CSV to narrow the scan.</li></ul></section>
+    </div>
+    <div id="view-inventory" class="view-panel" hidden>
     <div class="configuration">
       <section class="card">
-        <p class="step">01 / IMPORT</p><h2>Workspace CSV</h2>
-        <p>Upload UTF-8 CSV with a <code>workspace_id</code> column. Duplicates are removed. Maximum 500 workspaces.</p>
+        <p class="step">01 / OPTIONAL IMPORT</p><h2>Workspace CSV (optional)</h2>
+        <p>No CSV is needed for a tenant scan: use Home &gt; Scan tenant workspaces. To narrow the scope, upload UTF-8 CSV with a <code>workspace_id</code> column. Duplicates are removed. Maximum 500 IDs per CSV; tenant discovery is not limited to 500.</p>
         <form id="import-form">
           <label for="csv-file">CSV file</label>
           <input id="csv-file" name="file" type="file" accept=".csv,text/csv" required>
           <button type="submit">Import and inspect</button>
         </form>
-        <p id="import-count" class="muted">No workspaces imported this session.</p>
+        <p id="import-count" class="muted">CSV import is optional; no CSV loaded.</p>
       </section>
       <section class="card">
         <p class="step">02 / ASSIGN</p><h2>Your trial-capacity IDs</h2>
@@ -69,23 +102,40 @@
       </section>
     </div>
     <section class="card">
-      <div class="section-header"><div><p class="step">03 / MANAGE</p><h2>Imported workspaces <span id="workspace-count" class="count">0</span></h2></div><div class="actions"><button id="refresh" class="secondary" type="button">Refresh inventory</button><button id="backup" class="secondary" type="button">Back up selected metadata</button><button id="assign" type="button">Assign selected to trial</button></div></div>
+      <div class="section-header"><div><p class="step">03 / MANAGE</p><h2>Loaded workspaces <span id="workspace-count" class="count">0</span></h2></div><div class="actions"><button id="refresh" class="secondary" type="button">Refresh inventory</button><button id="backup" class="secondary" type="button">Back up selected metadata</button><button id="assign" type="button">Assign selected to trial</button></div></div>
       <p class="muted">Metadata backup downloads a ZIP with workspace/item inventory and supported artifact definitions. Failed or unsupported exports are listed in manifest.json. It excludes actual data and does not guarantee restoration. Definition export requires item read/write permissions. Protect downloaded definitions as sensitive content.</p>
       <p class="warning">Assignment moves selected non-trial workspaces, including workspaces currently on paid capacity. Existing trial workspaces are skipped. Assignment is verified before reporting success.</p>
-      <div class="table-wrap"><table><thead><tr><th><input id="select-all" type="checkbox" aria-label="Select all eligible workspaces"></th><th>Workspace</th><th>Capacity</th><th>Trial status</th><th>Actions</th></tr></thead><tbody id="workspaces"><tr><td colspan="5" class="empty">Import a CSV to inspect your workspaces.</td></tr></tbody></table></div>
+      <div class="table-wrap"><table><thead><tr><th><input id="select-all" type="checkbox" aria-label="Select all eligible workspaces"></th><th>Workspace</th><th>Capacity</th><th>Trial status</th><th>Actions</th></tr></thead><tbody id="workspaces"><tr><td colspan="5" class="empty">Scan tenant workspaces from Home, or import an optional CSV.</td></tr></tbody></table></div>
     </section>
     <section class="card" id="artifacts-panel">
       <div class="section-header"><div><p class="step">04 / EXPLORE</p><h2 id="artifact-title">Workspace artifacts</h2></div><span class="count" id="item-count">0</span></div>
       <label for="explore-search">Filter workspaces by name or ID</label>
-      <input id="explore-search" type="search" placeholder="Search imported workspaces..." autocomplete="off">
+      <input id="explore-search" type="search" placeholder="Search loaded workspaces..." autocomplete="off">
       <label for="explore-workspace">Workspace</label>
-      <select id="explore-workspace" aria-describedby="explore-workspace-count" disabled><option value="">Import a CSV to list workspaces.</option></select>
+      <select id="explore-workspace" aria-describedby="explore-workspace-count" disabled><option value="">Scan tenant workspaces or import an optional CSV.</option></select>
       <p id="explore-workspace-count" class="muted" role="status">No workspace inventory loaded.</p>
       <p class="muted">Choose a workspace here or use its Artifacts button above to load every page of its admin item inventory. Unavailable or inactive workspaces are listed but cannot be selected. Filtering here does not change selections for assignment or backup.</p>
       <div class="table-wrap"><table><thead><tr><th>Artifact name</th><th>Type</th><th>Item ID</th></tr></thead><tbody id="items"><tr><td colspan="3" class="empty">No workspace selected.</td></tr></tbody></table></div>
     </section>
-    <section class="card" id="results-panel" hidden><h2>Operation results</h2><p id="result-summary"></p><div class="table-wrap"><table><thead><tr><th>Workspace / item</th><th>Status</th><th>Details</th></tr></thead><tbody id="results"></tbody></table></div></section>
     <details class="card"><summary>Accessible capacities and API limitations</summary><div id="capacity-list"><p>Refresh inventory to load capacity details.</p></div><p class="muted">Only capacities where you have Contributor/Admin access are returned. The admin item inventory API is preview and rate-limited. Cleanup uses the Fabric item API: unsupported, dependent, or permission-blocked items are reported individually, never silently skipped. Folders and the workspace itself are retained. The API may soft-delete supported items; this app does not force permanent deletion.</p></details>
+    </div>
+    <div id="view-cleanup" class="view-panel" hidden>
+      <section class="card"><p class="step danger-text">REVIEW BEFORE DELETING</p><h2>Workspace cleanup</h2><p>No items are classified as stale or unused. Findings are metadata review prompts, not deletion authorization.</p><label for="cleanup-workspace">Workspace to review</label><select id="cleanup-workspace"><option value="">Scan tenant workspaces or import an optional CSV first.</option></select><div class="actions cleanup-actions"><button type="button" id="cleanup-preview">Preview workspace items</button><button type="button" class="secondary" data-route="inventory">Workspace inventory</button></div><p class="warning">The existing exact-phrase, snapshot-bound confirmation is always required. Take appropriate data and metadata backups before deletion.</p></section>
+      <section class="card"><h2>Scan review findings</h2><div class="table-wrap"><table><thead><tr><th>Workspace / item</th><th>Finding</th><th>Details</th></tr></thead><tbody id="cleanup-findings"><tr><td colspan="3" class="empty">Run a dashboard scan first.</td></tr></tbody></table></div></section>
+    </div>
+    <div id="view-backup" class="view-panel" hidden>
+      <section class="card"><h2>Metadata backup</h2><p>Select workspaces in Inventory, then download their metadata ZIP. Unsupported definitions and failures are listed in manifest.json.</p><div class="actions"><button type="button" class="secondary" data-route="inventory">Select workspaces</button><button type="button" id="backup-from-view">Back up selected metadata</button></div><p class="warning">Not a data backup. Protect downloaded definitions; they can contain sensitive code or connection references.</p></section>
+      <section class="card"><h2>Restore into another environment</h2><p>Use the standalone <code>restore_metadata.py</code> script from the app folder. Preview is the default; creation requires explicit destination confirmation and acknowledgment of unchanged references.</p><pre><code>.\.venv\Scripts\python.exe .\restore_metadata.py --help</code></pre><p>Follow the preview/apply commands in README.md. Existing name/type matches are skipped, never overwritten. References are not remapped; data, permissions and credentials are not restored.</p></section>
+    </div>
+    <div id="view-reports" class="view-panel" hidden>
+      <section class="card"><div class="section-header"><h2>Scan reports</h2><button type="button" id="download-report">Download JSON report</button></div><p id="report-status">Run a scan to generate a report.</p><p class="muted">Includes scope, scan timestamp, check results, errors, item metadata, settings, and session activity. Protect exported resource identifiers. No usage or ownership audit is performed.</p><div class="table-wrap"><table><thead><tr><th>Workspace</th><th>Health</th><th>Observed items</th><th>Findings / errors</th></tr></thead><tbody id="report-workspaces"><tr><td colspan="4" class="empty">No scan available.</td></tr></tbody></table></div></section>
+    </div>
+    <div id="view-settings" class="view-panel" hidden>
+      <section class="card"><h2>Session settings</h2><form id="dashboard-settings"><label><input id="check-item-descriptions" type="checkbox" checked> Include artifact description checks</label><p class="muted">Saving clears the previous scan. Settings stay in this session only.</p><button type="submit">Save scan settings</button></form></section>
+      <section class="card"><h2>How health is calculated</h2><p>Each accessible workspace metadata response, Admin inventory, Core inventory, known capacity SKU, nonempty workspace, workspace description, and enabled artifact description check has equal weight.</p><p><strong>Score = passed checks / all checks in assessed workspaces.</strong> Unknown checks do not pass; workspaces not yet scanned are excluded. Review coverage before interpreting the score.</p><p>Missing description fields are unknown, not assumed empty. An empty workspace is flagged only when both inventories succeeded. Unassigned capacity is not classified as unknown SKU. A paid capacity is not a health failure.</p><p>Health groups: scan errors first, then unknown evidence, then failed checks (needs review), otherwise healthy by these checks. This is not a Microsoft governance score or certification.</p></section>
+    </div>
+    <div id="view-about" class="view-panel" hidden><section class="card"><h2>About this utility</h2><p>Independent localhost administration utility for Microsoft Fabric: tenant discovery or optional CSV scope, user-provided trial-capacity assignment, metadata backup/restore and confirmation-protected cleanup.</p><p>Dashboard scope is either all workspaces returned by the signed-in tenant's Admin API or saved CSV workspace IDs. Item access still depends on permissions. Counts are observed metadata, not usage analytics. No stale-item detection, storage-size measurement, automatic archiving, ownership validation or automatic deletion is implemented.</p><p>Authentication, dashboard snapshots, settings and activity remain in memory. Signing out, expiry or restarting the server clears this session.</p></section></div>
+    <section class="card" id="results-panel" hidden><h2>Operation results</h2><p id="result-summary"></p><div class="table-wrap"><table><thead><tr><th>Workspace / item</th><th>Status</th><th>Details</th></tr></thead><tbody id="results"></tbody></table></div></section>
     <dialog id="delete-dialog">
       <div class="dialog-body"><p class="step danger-text">DANGER ZONE</p><h2>Delete workspace items</h2><p id="delete-workspace"></p>
       <p class="warning">This deletes the listed items, not the workspace. Back up your data first. Recovery depends on the item type and tenant settings. Items created after the preview will not be deleted.</p>

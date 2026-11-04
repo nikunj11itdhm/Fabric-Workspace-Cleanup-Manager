@@ -69,7 +69,7 @@ function exploreSetup() {
   return result;
 }
 
-test("Explore lists imported workspaces and filters by name or ID without API calls", () => {
+test("Explore lists loaded workspaces and filters by name or ID without API calls", () => {
   const { context, nodes, requests } = exploreSetup();
   const select = nodes["explore-workspace"];
   assert.equal(select.options.length, 5);
@@ -81,7 +81,7 @@ test("Explore lists imported workspaces and filters by name or ID without API ca
   nodes["explore-search"].value = "BETA-ID";
   nodes["explore-search"].events.input();
   assert.deepEqual(select.options.map((option) => option.value), ["", "beta-id"]);
-  assert.equal(nodes["explore-workspace-count"].textContent, "1 of 4 imported workspaces shown.");
+  assert.equal(nodes["explore-workspace-count"].textContent, "1 of 4 loaded workspaces shown.");
   assert.equal(requests.length, 0);
 });
 
@@ -116,7 +116,7 @@ test("Explore filter clears hidden selections and stale artifact results; empty 
   assert.equal(nodes["explore-workspace"].disabled, true);
   assert.equal(nodes["artifact-title"].textContent, "Workspace artifacts");
   assert.equal(nodes["item-count"].textContent, "0");
-  assert.equal(nodes["explore-workspace-count"].textContent, "0 of 4 imported workspaces shown.");
+  assert.equal(nodes["explore-workspace-count"].textContent, "0 of 4 loaded workspaces shown.");
   await context.loadWorkspaceArtifacts("beta-id");
   assert.equal(nodes["explore-search"].value, "");
   assert.equal(nodes["explore-workspace"].value, "beta-id");
@@ -202,6 +202,18 @@ test("GET requests do not introduce a token refresh or extra request", async () 
   assert.equal(requests[0].url, "/api/inventory");
 });
 
+test("JSON report downloads keep the response body and refresh CSRF before generation", async () => {
+  const { context, requests } = setup();
+  const fetch = context.fetch;
+  const response = { ok: true, json: async () => { throw new Error("Download response must not be consumed as JSON"); } };
+  context.fetch = async (url, options) => {
+    if (url === "/auth/session") return fetch(url, options);
+    requests.push({ url, options });
+    return response;
+  };
+  assert.equal(await context.api("/api/dashboard/report", { method: "POST" }, "download"), response);
+  assert.equal(requests[1].options.headers["X-CSRF-Token"], "fresh-token");
+});
 test("metadata ZIP download refreshes CSRF and makes partial exports visible", async () => {
   for (const status of ["complete", "partial"]) {
     const { context, requests, nodes } = setup();
